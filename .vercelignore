@@ -1,0 +1,10 @@
+.git
+__pycache__
+*.pyc
+.env
+local_db.sqlite
+test_*.py
+*.log
+.gemini
+tmp
+brain
