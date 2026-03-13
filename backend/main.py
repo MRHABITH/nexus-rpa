@@ -754,6 +754,7 @@ def update_bot(bot_id: int, req: BotUpdate, user=Depends(current_user)):
     for b in IN_MEMORY_DB['bots']:
         if b.get('id') == bot_id:
             b.update(fields)
+            sync_db_to_disk()
             return b
     raise HTTPException(404, "Bot not found")
 
@@ -765,6 +766,7 @@ def delete_bot(bot_id: int, user=Depends(current_user)):
     if bot.get("status") == "running":
         raise HTTPException(400, "Stop the bot before deleting")
     IN_MEMORY_DB['bots'] = [b for b in IN_MEMORY_DB['bots'] if b.get('id') != bot_id]
+    sync_db_to_disk()
 
 @app.post("/api/bots/{bot_id}/run")
 def run_bot(bot_id: int, user=Depends(current_user)):
@@ -791,6 +793,7 @@ def stop_bot(bot_id: int, user=Depends(current_user)):
     for b in IN_MEMORY_DB['bots']:
         if b.get('id') == bot_id:
             b['status'] = 'idle'
+            sync_db_to_disk()
             break
     return {"detail": "Bot stopped"}
 
@@ -834,12 +837,14 @@ def update_workflow(wf_id: int, req: WorkflowCreate, user=Depends(current_user))
             w['description'] = req.description
             w['steps'] = req.steps
             d = dict(w)
+            sync_db_to_disk()
             return d
     raise HTTPException(404, "Workflow not found")
 
 @app.delete("/api/workflows/{wf_id}", status_code=204)
 def delete_workflow(wf_id: int, user=Depends(current_user)):
     IN_MEMORY_DB['workflows'] = [w for w in IN_MEMORY_DB['workflows'] if w.get('id') != wf_id]
+    sync_db_to_disk()
 
 # ─── Logs ─────────────────────────────────────────────────────────────────────
 @app.get("/api/logs")
@@ -971,6 +976,7 @@ def execute_automation_task(task_id: str, user=Depends(current_user)):
         raise HTTPException(404, "Task not found")
 
     start = time.time()
+    result_msg = "Task engine initialized"
     # Update task stats
     task['execution_count'] = task.get('execution_count', 0) + 1
     task['last_executed'] = datetime.now().isoformat()
@@ -1017,6 +1023,8 @@ def execute_automation_task(task_id: str, user=Depends(current_user)):
         'message': f"Executed: {result_msg} (run #{task['execution_count']})",
         'timestamp': datetime.now().isoformat()
     })
+    
+    sync_db_to_disk()
 
     return {
         "success": True,
@@ -1035,6 +1043,7 @@ def toggle_automation_task(task_id: str, user=Depends(current_user)):
     if not task:
         raise HTTPException(404, "Task not found")
     task['enabled'] = 0 if task.get('enabled') else 1
+    sync_db_to_disk()
     return {"success": True, "enabled": bool(task['enabled']), "task": task}
 
 @app.get("/api/automation/logs")
