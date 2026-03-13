@@ -76,7 +76,7 @@ IN_MEMORY_DB = {
     'reports': [],
 }
 
-# Default admin user
+# Default admin user fallback
 IN_MEMORY_DB['users'].append({
     'id': 1,
     'email': 'admin@rpa.local',
@@ -85,6 +85,31 @@ IN_MEMORY_DB['users'].append({
     'role': 'admin',
     'created_at': datetime.now().isoformat()
 })
+
+DB_PATH = Path("/tmp/nexus_db.json")
+
+def load_db_from_disk():
+    global IN_MEMORY_DB
+    if DB_PATH.exists():
+        try:
+            with open(DB_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Merge loaded data, giving priority to disk
+                for key in IN_MEMORY_DB.keys():
+                    if key in data:
+                        IN_MEMORY_DB[key] = data[key]
+        except Exception as e:
+            print(f"Error loading DB from disk: {e}")
+
+def sync_db_to_disk():
+    try:
+        with open(DB_PATH, "w", encoding="utf-8") as f:
+            json.dump(IN_MEMORY_DB, f)
+    except Exception as e:
+        print(f"Error syncing DB to disk: {e}")
+
+# Load upon startup
+load_db_from_disk()
 
 # ─── In-Memory Database ────────────────────────────────────────────────────────
 class InMemoryResult:
@@ -399,7 +424,9 @@ class InMemoryDB:
 
         return result
 
-    def commit(self): pass
+    def commit(self):
+        sync_db_to_disk()
+
     def close(self): pass
 
 
@@ -579,8 +606,8 @@ def stats(user=Depends(current_user)):
     }
 
 # ─── Bots ─────────────────────────────────────────────────────────────────────
-def run_bot_async(bot_id: int, bot_str_id: str, bot_type: str, execution_id: int):
-    """Simulate bot execution or run actual email agent in background thread."""
+def run_bot_sync(bot_id: int, bot_str_id: str, bot_type: str, execution_id: int):
+    """Execute bot synchronously for serverless compatibility."""
     bot = None
     for b in IN_MEMORY_DB['bots']:
         if b.get('id') == bot_id:
@@ -591,166 +618,114 @@ def run_bot_async(bot_id: int, bot_str_id: str, bot_type: str, execution_id: int
 
     bot_type_clean = str(bot_type).lower().strip()
     
-    while True:
-        # Check if bot is still supposed to be running (allows manual Stop)
-        current_b = next((b for b in IN_MEMORY_DB['bots'] if b.get('id') == bot_id), None)
-        if not current_b or current_b.get('status') != 'running':
-            break
+    current_b = next((b for b in IN_MEMORY_DB['bots'] if b.get('id') == bot_id), None)
+    if not current_b or current_b.get('status') != 'running':
+        return
 
-        start_time = time.time()
-        success = False
-        status_msg = ""
-        config = current_b.get('config', {})
+    start_time = time.time()
+    success = False
+    status_msg = ""
+    config = current_b.get('config', {})
+    
+    if bot_type_clean in ('email', 'email parsing'):
+        # --- Live Email Execution ---
+        to_email = config.get('to', '')
+        subject = config.get('subject', current_b.get('name', 'Automation Notification'))
+        body = config.get('body', current_b.get('description', 'Sent by Nexus RPA Email Bot'))
         
-        if bot_type_clean in ('email', 'email parsing'):
-            # --- Live Email Execution ---
-            to_email = config.get('to', '')
-            subject = config.get('subject', current_b.get('name', 'Automation Notification'))
-            body = config.get('body', current_b.get('description', 'Sent by Nexus RPA Email Bot'))
-            
-            # Pull SMTP creds from individual bot config (User's own credentials)
-            smtp_server = 'smtp.gmail.com'
-            smtp_port = 587
-            smtp_user = config.get('fromEmail', '')
-            smtp_pass = config.get('fromPw', '')
-            
-            if not to_email:
-                success = False
-                status_msg = "Failed: Missing 'To' email address in config"
-            elif not smtp_user or not smtp_pass:
-                success = False
-                status_msg = "Failed: Sender Email or App Password not provided in bot config"
-                time.sleep(1) # simulate failure delay
-            else:
-                try:
-                    msg = EmailMessage()
-                    msg.set_content(body)
-                    msg['Subject'] = subject
-                    msg['From'] = smtp_user
-                    msg['To'] = to_email
-
-                    server = smtplib.SMTP(smtp_server, smtp_port)
-                    server.starttls()
-                    server.login(smtp_user, smtp_pass)
-                    server.send_message(msg)
-                    server.quit()
-                    success = True
-                    status_msg = f"Email sent successfully from {smtp_user} to {to_email}"
-                except Exception as e:
-                    success = False
-                    status_msg = f"Email Failed: {str(e)}"
-        elif bot_type_clean == 'web':
-            # Multi-step realistic log sequence
-            log_id = max([l.get('id', 0) for l in IN_MEMORY_DB['logs']], default=0) + 1
-            IN_MEMORY_DB['logs'].append({'id': log_id, 'bot_id': bot_str_id, 'task_name': bot_type, 'level': 'INFO', 'message': "Initializing Headless Chrome (version 120.0.6099.109)...", 'timestamp': datetime.now().isoformat()})
-            time.sleep(1.2)
-            
-            log_id += 1
-            IN_MEMORY_DB['logs'].append({'id': log_id, 'bot_id': bot_str_id, 'task_name': bot_type, 'level': 'INFO', 'message': "Navigating to: https://example-scraped.com/products?category=automation", 'timestamp': datetime.now().isoformat()})
-            time.sleep(1.5)
-            
-            log_id += 1
-            IN_MEMORY_DB['logs'].append({'id': log_id, 'bot_id': bot_str_id, 'task_name': bot_type, 'level': 'INFO', 'message': "Waiting for selector: '.product-grid' (timeout 30s)...", 'timestamp': datetime.now().isoformat()})
-            time.sleep(1.0)
-
-            success = random.random() > 0.05
-            if success:
-                log_id += 1
-                IN_MEMORY_DB['logs'].append({'id': log_id, 'bot_id': bot_str_id, 'task_name': bot_type, 'level': 'INFO', 'message': "Successfully extracted 142 DOM elements. Mapping data...", 'timestamp': datetime.now().isoformat()})
-                status_msg = "Web Scraping Completed Successfully (142 items saved)"
-            else:
-                log_id += 1
-                IN_MEMORY_DB['logs'].append({
-                    'id': log_id, 'bot_id': bot_str_id, 'task_name': bot_type, 'level': 'ERROR', 
-                    'message': "ElementClickInterceptedException: Message: element click intercepted: Element is not clickable at point (521, 623). Other element would receive the click: <div class='footer-overlay'></div>", 
-                    'timestamp': datetime.now().isoformat()
-                })
-                status_msg = "TimeoutException during element interaction"
-        elif bot_type_clean == 'api':
-            time.sleep(0.8)
-            log_id = max([l.get('id', 0) for l in IN_MEMORY_DB['logs']], default=0) + 1
-            IN_MEMORY_DB['logs'].append({'id': log_id, 'bot_id': bot_str_id, 'task_name': bot_type, 'level': 'INFO', 'message': f"GET /api/v1/sync returned 200 OK (45 records)", 'timestamp': datetime.now().isoformat()})
-            time.sleep(0.5)
-            success = random.random() > 0.05
-            status_msg = "API Sync Completed (45 records updated)" if success else "HTTP 502 Bad Gateway during Sync"
-        elif bot_type_clean == 'data':
-            time.sleep(2.0)
-            log_id = max([l.get('id', 0) for l in IN_MEMORY_DB['logs']], default=0) + 1
-            IN_MEMORY_DB['logs'].append({'id': log_id, 'bot_id': bot_str_id, 'task_name': bot_type, 'level': 'INFO', 'message': f"Transformed 14,502 rows and validated schema constraints.", 'timestamp': datetime.now().isoformat()})
-            time.sleep(1.0)
-            success = random.random() > 0.05
-            status_msg = "Data Pipeline Finished (0 validation errors)" if success else "Schema Validation Error on row 842"
-        elif bot_type_clean == 'file':
-            time.sleep(0.5)
-            success = True
-            found = random.random() > 0.5
-            if found:
-                status_msg = "Detected 2 new files in watch directory. Triggering downstream."
-            else:
-                status_msg = "Directory scan complete. No new files found."
+        # Pull SMTP creds from individual bot config
+        smtp_server = 'smtp.gmail.com'
+        smtp_port = 587
+        smtp_user = config.get('fromEmail', '')
+        smtp_pass = config.get('fromPw', '')
+        
+        if not to_email:
+            success = False
+            status_msg = "Failed: Missing 'To' email address in config"
+        elif not smtp_user or not smtp_pass:
+            success = False
+            status_msg = "Failed: Sender Email or App Password not provided in bot config"
+            time.sleep(1) # simulate failure delay
         else:
-            # Fallback
-            duration = random.uniform(1.5, 4.0)
-            time.sleep(duration)
-            success = random.random() > 0.1
-            status_msg = "Simulated Execution Completed" if success else "Simulated Execution Failed"
-            
-        duration = time.time() - start_time
-        status = 'success' if success else 'failed'
-        
-        # Update bot stats
-        for b in IN_MEMORY_DB['bots']:
-            if b.get('id') == bot_id:
-                if success:
-                    b['success_count'] = b.get('success_count', 0) + 1
-                else:
-                    b['failed_count'] = b.get('failed_count', 0) + 1
-                break
-
-        # Update execution record
-        for e in IN_MEMORY_DB['executions']:
-            if e.get('id') == execution_id:
-                e['status'] = status
-                e['completed_at'] = datetime.now().isoformat()
-                e['duration_ms'] = int(duration * 1000)
-                break
-
-        # Add log entry
-        level = 'INFO' if success else 'ERROR'
-        str_msg = f"{status_msg} in {duration:.1f}s"
-        log_id = max([l.get('id', 0) for l in IN_MEMORY_DB['logs']], default=0) + 1
-        IN_MEMORY_DB['logs'].append({
-            'id': log_id,
-            'bot_id': bot_str_id,
-            'task_name': bot_type,
-            'level': level,
-            'message': str_msg,
-            'timestamp': datetime.now().isoformat()
-        })
-        
-        # Determine if we should loop continuously
-        schedule = current_b.get('schedule', '')
-        if schedule.startswith('loop:'):
             try:
-                interval_secs = int(schedule.split(':')[1])
-            except Exception:
-                interval_secs = 60
-                
-            sleep_time = 0
-            # Sleep in intervals so manual stop breaks the wait instantly
-            while sleep_time < interval_secs:
-                time.sleep(1)
-                sleep_time += 1
-                check_b = next((b for b in IN_MEMORY_DB['bots'] if b.get('id') == bot_id), None)
-                if not check_b or check_b.get('status') != 'running':
-                    break
-        else:
-            # Not a loop, mark idle and exit thread cleanly
-            for b in IN_MEMORY_DB['bots']:
-                if b.get('id') == bot_id:
-                    b['status'] = 'idle'
-                    break
+                msg = EmailMessage()
+                msg.set_content(body)
+                msg['Subject'] = subject
+                msg['From'] = smtp_user
+                msg['To'] = to_email
+
+                server = smtplib.SMTP(smtp_server, smtp_port)
+                server.starttls()
+                server.login(smtp_user, smtp_pass)
+                server.send_message(msg)
+                server.quit()
+                success = True
+                status_msg = f"Email sent successfully from {smtp_user} to {to_email}"
+            except Exception as e:
+                success = False
+                status_msg = f"Email Failed: {str(e)}"
+    elif bot_type_clean == 'web':
+        time.sleep(1.0)
+        success = random.random() > 0.05
+        status_msg = "Web Scraping Completed Successfully (142 items saved)" if success else "TimeoutException during element interaction"
+    elif bot_type_clean == 'api':
+        time.sleep(0.5)
+        success = random.random() > 0.05
+        status_msg = "API Sync Completed (45 records updated)" if success else "HTTP 502 Bad Gateway during Sync"
+    elif bot_type_clean == 'data':
+        time.sleep(1.0)
+        success = random.random() > 0.05
+        status_msg = "Data Pipeline Finished (0 validation errors)" if success else "Schema Validation Error on row 842"
+    elif bot_type_clean == 'file':
+        time.sleep(0.5)
+        success = True
+        found = random.random() > 0.5
+        status_msg = "Detected 2 new files in watch directory." if found else "No new files found."
+    else:
+        # Fallback
+        time.sleep(1.0)
+        success = random.random() > 0.1
+        status_msg = "Simulated Execution Completed" if success else "Simulated Execution Failed"
+        
+    duration = time.time() - start_time
+    status = 'success' if success else 'failed'
+    
+    # Update bot stats
+    for b in IN_MEMORY_DB['bots']:
+        if b.get('id') == bot_id:
+            if success:
+                b['success_count'] = b.get('success_count', 0) + 1
+            else:
+                b['failed_count'] = b.get('failed_count', 0) + 1
+            # Mark idle now that execution is complete synchronously
+            b['status'] = 'idle'
             break
+
+    # Update execution record
+    for e in IN_MEMORY_DB['executions']:
+        if e.get('id') == execution_id:
+            e['status'] = status
+            e['completed_at'] = datetime.now().isoformat()
+            e['duration_ms'] = int(duration * 1000)
+            break
+
+    # Add log entry
+    level = 'INFO' if success else 'ERROR'
+    str_msg = f"{status_msg} in {duration:.1f}s"
+    log_id = max([l.get('id', 0) for l in IN_MEMORY_DB['logs']], default=0) + 1
+    IN_MEMORY_DB['logs'].append({
+        'id': log_id,
+        'bot_id': bot_str_id,
+        'task_name': bot_type,
+        'level': level,
+        'message': str_msg,
+        'timestamp': datetime.now().isoformat()
+    })
+    
+    # Save the DB state to disk
+    db_ctx = get_db()
+    db_ctx.commit()
+    db_ctx.close()
 
 @app.get("/api/bots")
 def list_bots(user=Depends(current_user)):
@@ -807,12 +782,8 @@ def run_bot(bot_id: int, user=Depends(current_user)):
     db.commit()
     db.close()
 
-    t = threading.Thread(
-        target=run_bot_async,
-        args=(bot_id, bot["bot_id"], bot.get("bot_type", ""), execution_id),
-        daemon=True
-    )
-    t.start()
+    # Run synchronously to support severless constraints
+    run_bot_sync(bot_id, bot["bot_id"], bot.get("bot_type", ""), execution_id)
     return {"execution_id": execution_id, "status": "started", "bot": bot["bot_id"]}
 
 @app.post("/api/bots/{bot_id}/stop")
@@ -1085,41 +1056,82 @@ def delete_automation_task(task_id: str, user=Depends(current_user)):
     db.close()
     return None
 
-# ─── Startup ──────────────────────────────────────────────────────────────────
-def cron_scheduler_loop():
-    """Background thread to trigger bots on their cron schedules."""
-    if not croniter:
-        print("Warning: croniter not installed, scheduled bots will not run.")
-        return
-        
-    while True:
-        now = datetime.now()
-        for bot in list(IN_MEMORY_DB['bots']):
-            schedule = bot.get('schedule', '').strip()
-            if not schedule or bot.get('status') == 'running':
-                continue
-                
+@app.get("/api/cron/trigger")
+@app.post("/api/cron/trigger")
+def cron_trigger():
+    """Vercel cron job trigger to execute scheduled bots synchronously."""
+    now = datetime.now()
+    executed = []
+    
+    for bot in list(IN_MEMORY_DB['bots']):
+        schedule = bot.get('schedule', '').strip()
+        if not schedule or bot.get('status') == 'running':
+            continue
+            
+        should_run = False
+        if schedule.startswith('loop:'):
             try:
-                # croniter check to see if due within this exact minute
-                # croniter match allows matching datetime down to minute resolution
-                if croniter.match(schedule, now):
-                    try:
-                        # trigger the bot run logic with None as user (system run)
-                        run_bot(bot['id'], user=None)
-                    except Exception as rb_exc:
-                        print(f"Error triggering scheduled bot {bot['bot_id']}: {rb_exc}")
-            except Exception as e:
-                # Invalid cron syntax
-                pass
+                interval_secs = int(schedule.split(':')[1])
+            except Exception:
+                interval_secs = 60
+            
+            last_run = bot.get('last_run')
+            if not last_run:
+                should_run = True
+            else:
+                last_time = datetime.fromisoformat(last_run)
+                if (now - last_time).total_seconds() >= interval_secs:
+                    should_run = True
+        elif croniter and croniter.match(schedule, now):
+            should_run = True
+            
+        if should_run:
+            try:
+                db = get_db()
+                bot_id = bot['id']
+                cur = db.execute("INSERT INTO executions(bot_id,bot_str_id,status,triggered_by,started_at) VALUES(?,?,?,?,?)",
+                                 (bot_id, bot["bot_id"], "running", "cron", now.isoformat()))
+                exec_id = cur.lastrowid
+                db.commit()
+                db.close()
                 
-        # Wait until the start of the next minute
-        sleep_secs = 60 - datetime.now().second
-        time.sleep(max(1, sleep_secs))
+                run_bot_sync(bot_id, bot["bot_id"], bot.get("bot_type", ""), exec_id)
+                executed.append(bot["bot_id"])
+            except Exception as e:
+                print(f"Error executing bot {bot.get('bot_id')}: {e}")
+
+    # Trigger AI automations
+    for task in list(IN_MEMORY_DB['automation_tasks']):
+        if not task.get('enabled') or task.get('status') != 'active':
+            continue
+        try:
+            interval_secs = task.get('interval_seconds', 600)
+            last_run = task.get('last_executed')
+            should_run = False
+            
+            if not last_run:
+                should_run = True
+            else:
+                last_time = datetime.fromisoformat(last_run)
+                if (now - last_time).total_seconds() >= interval_secs:
+                    should_run = True
+                    
+            if should_run:
+                # We call the existing endpoint logic directly
+                # However, the endpoint depends on user dependency which we satisfy by None
+                try:
+                    execute_automation_task(task['task_id'], user=None)
+                    executed.append(task['task_id'])
+                except Exception as ex:
+                    print(f"Failed AI task: {ex}")
+        except Exception as e:
+            print(f"Error scheduling AI task {task.get('task_id')}: {e}")
+
+    db = get_db()
+    db.commit()
+    return {"status": "success", "executed": executed, "time": now.isoformat()}
 
 if __name__ == "__main__":
-    t_cron = threading.Thread(target=cron_scheduler_loop, daemon=True)
-    t_cron.start()
-    
     print("\n" + "=" * 55)
     print("  ⚡  NEXUS RPA SYSTEM — Backend")
     print("=" * 55)
