@@ -4,7 +4,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "api/index.py"
+      "destination": "/api/index.py"
     },
     {
       "source": "/(.*)",
@@ -12,7 +12,8 @@
     }
   ],
   "functions": {
-    "api/index.py": {
+    "api/*.py": {
+      "runtime": "@vercel/python",
       "maxDuration": 10
     }
   }
